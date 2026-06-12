@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  mailserver:
+    build: .
+    container_name: postman-rabbit
+    hostname: mail.tudominio.com
+    restart: unless-stopped
+    ports:
+      - "25:25"
+      - "587:587"
+      - "465:465"
+      - "143:143"
+      - "993:993"
+    volumes:
+      - maildata:/var/mail
+      - ./certs:/etc/mailserver/certs:ro
+      - ./dkim:/etc/mailserver/dkim:ro
+    environment:
+      HOSTNAME: mail.tudominio.com
+      DOMAIN: tudominio.com
+      USERS: "usuario1:contraseña1,usuario2:contraseña2"
+      TLS_CERT: /etc/mailserver/certs/fullchain.pem
+      TLS_KEY: /etc/mailserver/certs/privkey.pem
+      DKIM_SELECTOR: default
+      DKIM_KEY_FILE: /etc/mailserver/dkim/default.pem
+
+volumes:
+  maildata:
