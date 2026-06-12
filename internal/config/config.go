@@ -9,19 +9,19 @@ import (
 )
 
 type Config struct {
-	Hostname     string
-	Domain       string
-	MailDir      string
-	TLSCertFile  string
-	TLSKeyFile   string
+	Hostname    string
+	Domain      string
+	MailDir     string
+	TLSCertFile string
+	TLSKeyFile  string
 
-	SMTPPort     int
+	SMTPPort       int
 	SubmissionPort int
-	SMTPSPort    int
-	IMAPPort     int
-	IMAPSPort    int
+	SMTPSPort      int
+	IMAPPort       int
+	IMAPSPort      int
 
-	Users        map[string]string
+	Users map[string]string
 
 	DKIMSelector string
 	DKIMKeyFile  string

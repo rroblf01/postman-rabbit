@@ -1,25 +1,24 @@
-version: "3.8"
-
 services:
   mailserver:
-    build: .
+    # Use the published image, or replace with `build: .` to build locally.
+    image: ghcr.io/rroblf01/postman-rabbit:latest
     container_name: postman-rabbit
-    hostname: mail.tudominio.com
+    hostname: mail.example.com
     restart: unless-stopped
     ports:
-      - "25:25"
-      - "587:587"
-      - "465:465"
-      - "143:143"
-      - "993:993"
+      - "25:25"     # SMTP (receive mail from other servers)
+      - "587:587"   # Submission (clients send mail, STARTTLS)
+      - "465:465"   # SMTPS (clients send mail, implicit TLS)
+      - "143:143"   # IMAP (read mail, STARTTLS)
+      - "993:993"   # IMAPS (read mail, implicit TLS)
     volumes:
       - maildata:/var/mail
       - ./certs:/etc/mailserver/certs:ro
       - ./dkim:/etc/mailserver/dkim:ro
     environment:
-      HOSTNAME: mail.tudominio.com
-      DOMAIN: tudominio.com
-      USERS: "usuario1:contraseña1,usuario2:contraseña2"
+      HOSTNAME: mail.example.com
+      DOMAIN: example.com
+      USERS: "alice:change-me,bob:change-me-too"
       TLS_CERT: /etc/mailserver/certs/fullchain.pem
       TLS_KEY: /etc/mailserver/certs/privkey.pem
       DKIM_SELECTOR: default

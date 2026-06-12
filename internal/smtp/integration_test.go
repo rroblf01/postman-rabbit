@@ -12,7 +12,6 @@ import (
 	smtpclient "github.com/emersion/go-smtp"
 	"github.com/rroblf01/postman-rabbit/internal/auth"
 	"github.com/rroblf01/postman-rabbit/internal/delivery"
-	"github.com/rroblf01/postman-rabbit/internal/dkim"
 	"github.com/rroblf01/postman-rabbit/internal/storage"
 )
 
@@ -29,7 +28,7 @@ func startSMTPServer(t *testing.T) (addr string, store *storage.Manager, cleanup
 	})
 	del := delivery.New("mail.test.localhost")
 
-	b := NewBackend(authMgr, store, del, &dkim.Signer{}, "mail.test.localhost", "test.localhost")
+	b := NewBackend(authMgr, store, del, nil, "mail.test.localhost", "test.localhost", true)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -6,9 +6,9 @@ import (
 
 func TestAuthenticate(t *testing.T) {
 	m := New(map[string]string{
-		"alice":   "pass123",
-		"bob":     "secret",
-		"CARLOS":  "UpperCase",
+		"alice":  "pass123",
+		"bob":    "secret",
+		"CARLOS": "UpperCase",
 	})
 
 	tests := []struct {
@@ -89,9 +89,9 @@ func TestAuthenticateLongCredentials(t *testing.T) {
 
 func TestAuthenticateSpecialChars(t *testing.T) {
 	m := New(map[string]string{
-		"user@domain":   "p@ss!",
-		"user name":     "pass word",
-		"user\n":        "pass",
+		"user@domain": "p@ss!",
+		"user name":   "pass word",
+		"user\n":      "pass",
 	})
 
 	if !m.Authenticate("user@domain", "p@ss!") {

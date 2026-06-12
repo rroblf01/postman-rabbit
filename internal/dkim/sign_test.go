@@ -84,7 +84,7 @@ func TestNewSignerWithPKCS1Key(t *testing.T) {
 		t.Fatal("NewSigner returned nil with PKCS1 key")
 	}
 
-	signed, err := s.Sign([]byte("Subject: PKCS1 Test\r\n\r\nBody"), "from@example.com", "<id@example.com>")
+	signed, err := s.Sign([]byte("Subject: PKCS1 Test\r\n\r\nBody"))
 	if err != nil {
 		t.Fatalf("Sign with PKCS1 key = %v", err)
 	}
@@ -103,7 +103,7 @@ func TestSignerSign(t *testing.T) {
 	}
 
 	body := []byte("From: alice@example.com\r\nTo: bob@test.com\r\nSubject: Test\r\n\r\nHello World!")
-	signed, err := s.Sign(body, "alice@example.com", "<msgid@example.com>")
+	signed, err := s.Sign(body)
 	if err != nil {
 		t.Fatalf("Sign() = %v", err)
 	}
@@ -125,7 +125,7 @@ func TestSignerSign(t *testing.T) {
 func TestSignerNil(t *testing.T) {
 	var s *Signer = nil
 	body := []byte("From: test@test.com\r\n\r\nBody")
-	result, err := s.Sign(body, "test@test.com", "<id@test.com>")
+	result, err := s.Sign(body)
 	if err != nil {
 		t.Fatalf("Sign on nil should not error: %v", err)
 	}

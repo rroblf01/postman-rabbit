@@ -10,9 +10,9 @@ import (
 
 func TestExtractDomain(t *testing.T) {
 	tests := []struct {
-		addr     string
-		want     string
-		wantErr  bool
+		addr    string
+		want    string
+		wantErr bool
 	}{
 		{"user@example.com", "example.com", false},
 		{"alice@gmail.com", "gmail.com", false},

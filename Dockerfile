@@ -1,6 +1,9 @@
-FROM golang:1.23-alpine AS builder
+# ---- build stage ----
+FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git ca-certificates
+# ca-certificates so we can copy the CA bundle into the scratch image (needed
+# for outbound STARTTLS certificate verification).
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /build
 
@@ -9,24 +12,26 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /usr/local/bin/mailserver ./cmd/mailserver
+# Fully static binary (no libc), stripped, so it runs in scratch.
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /mailserver ./cmd/mailserver
 
-FROM alpine:3.19
+# ---- runtime stage ----
+FROM scratch
 
-RUN apk add --no-cache ca-certificates tzdata
+# CA bundle for verifying remote MX servers during outbound STARTTLS.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /mailserver /mailserver
 
-RUN addgroup -S mail && adduser -S mail -G mail
-
-COPY --from=builder /usr/local/bin/mailserver /usr/local/bin/mailserver
-
-RUN mkdir -p /var/mail /etc/mailserver && chown -R mail:mail /var/mail
-
-USER mail
+# NOTE: scratch has no users, so the process runs as root (uid 0). This is what
+# lets it bind the privileged mail ports (<1024) without extra capabilities.
+# The container is otherwise empty — no shell, no package manager.
 
 EXPOSE 25 587 465 143 993
 
 VOLUME ["/var/mail", "/etc/mailserver"]
 
+# Non-secret defaults only. USERS, TLS_CERT, TLS_KEY and DKIM_KEY_FILE are read
+# from the environment at runtime (see README) and intentionally left unset here.
 ENV HOSTNAME=mail.localhost \
     DOMAIN=localhost \
     MAILDIR=/var/mail \
@@ -35,11 +40,7 @@ ENV HOSTNAME=mail.localhost \
     SMTPS_PORT=465 \
     IMAP_PORT=143 \
     IMAPS_PORT=993 \
-    TLS_CERT="" \
-    TLS_KEY="" \
-    USERS="" \
     DKIM_SELECTOR=default \
-    DKIM_KEY_FILE="" \
     RELAY_ENABLED=true
 
-ENTRYPOINT ["/usr/local/bin/mailserver"]
+ENTRYPOINT ["/mailserver"]

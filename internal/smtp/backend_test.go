@@ -25,7 +25,7 @@ func newTestBackend(t *testing.T) (*Backend, *storage.Manager, string) {
 	del := delivery.New("test.localhost")
 	var dkimSigner *dkim.Signer
 
-	backend := NewBackend(authMgr, store, del, dkimSigner, "test.localhost", "test.com")
+	backend := NewBackend(authMgr, store, del, dkimSigner, "test.localhost", "test.com", true)
 	return backend, store, dir
 }
 
@@ -214,9 +214,9 @@ func TestAuthPLAIN_UnexpectedCall(t *testing.T) {
 	s := sess.(*Session)
 
 	srv, _ := s.Auth("PLAIN")
-	srv.Next(nil)                                     // first call
-	srv.Next([]byte("\x00testuser\x00testpass"))       // second call, auth succeeds
-	_, _, err := srv.Next([]byte("extra"))             // third call should fail
+	srv.Next(nil)                                // first call
+	srv.Next([]byte("\x00testuser\x00testpass")) // second call, auth succeeds
+	_, _, err := srv.Next([]byte("extra"))       // third call should fail
 	if err == nil {
 		t.Error("expected error for unexpected call after auth done")
 	}
@@ -289,8 +289,8 @@ func TestAuthLOGIN_InvalidPassword(t *testing.T) {
 
 	srv, _ := s.Auth("LOGIN")
 
-	srv.Next(nil)            // step 0
-	srv.Next([]byte("testuser"))  // step 1
+	srv.Next(nil)                              // step 0
+	srv.Next([]byte("testuser"))               // step 1
 	_, _, err := srv.Next([]byte("wrongpass")) // step 2
 	if err == nil {
 		t.Error("expected error for wrong password")

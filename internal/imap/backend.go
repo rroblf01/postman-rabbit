@@ -69,18 +69,18 @@ func (s *session) Select(name string, options *imap.SelectOptions) (*imap.Select
 		}
 	}
 	msgs := scanDir(mboxDir)
-	unseen := 0
+	firstUnseen := uint32(0)
 	for _, m := range msgs {
 		if !hasFlag(m.flags, "S") {
-			unseen++
+			firstUnseen = m.seq
+			break
 		}
 	}
-	uidNext := uint32(len(msgs) + 1)
 	return &imap.SelectData{
-		UIDNext:           imap.UID(uidNext),
+		UIDNext:           mailboxUIDNext(mboxDir),
 		UIDValidity:       uidVal(mboxDir),
 		NumMessages:       uint32(len(msgs)),
-		FirstUnseenSeqNum: uint32(unseen),
+		FirstUnseenSeqNum: firstUnseen,
 	}, nil
 }
 
@@ -107,7 +107,7 @@ func (s *session) Rename(oldName, newName string, options *imap.RenameOptions) e
 	return os.Rename(s.mboxPath(oldName), s.mboxPath(newName))
 }
 
-func (s *session) Subscribe(name string) error  { return nil }
+func (s *session) Subscribe(name string) error   { return nil }
 func (s *session) Unsubscribe(name string) error { return nil }
 
 func (s *session) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
@@ -154,7 +154,7 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 		data.NumUnseen = &unseen
 	}
 	if options.UIDNext {
-		data.UIDNext = imap.UID(len(msgs) + 1)
+		data.UIDNext = mailboxUIDNext(mboxDir)
 	}
 	if options.UIDValidity {
 		data.UIDValidity = uidVal(mboxDir)
@@ -165,49 +165,29 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 func (s *session) Append(mailbox string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
 	mboxDir := s.mboxPath(mailbox)
 
-	sub := filepath.Join(mboxDir, "new")
-	before := make(map[string]bool)
-	entries, _ := os.ReadDir(sub)
-	for _, e := range entries {
-		before[e.Name()] = true
+	var flags []maildir.Flag
+	if options != nil {
+		flags = maildirFlagsFromIMAPFlags(options.Flags)
 	}
 
-	del, err := maildir.NewDelivery(mboxDir)
+	md := maildir.Dir(mboxDir)
+	msg, wc, err := md.Create(flags)
 	if err != nil {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Cannot append"}
 	}
-	if _, err := io.Copy(del, r); err != nil {
-		del.Abort()
+	if _, err := io.Copy(wc, r); err != nil {
+		wc.Close()
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Cannot read message"}
 	}
-	if err := del.Close(); err != nil {
+	if err := wc.Close(); err != nil {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Cannot save message"}
 	}
 
-	key := findNewKey(sub, before)
-	uid := uidFromKey(key)
-
-	if options != nil && len(options.Flags) > 0 {
-		suffix := ":2," + strings.Join(maildirFlagsFromIMAP(options.Flags), "")
-		oldPath := filepath.Join(sub, key)
-		newPath := filepath.Join(mboxDir, "cur", key+suffix)
-		os.Rename(oldPath, newPath)
-	}
-
+	st := syncUIDs(mboxDir)
 	return &imap.AppendData{
-		UIDValidity: uidVal(mboxDir),
-		UID:         imap.UID(uid),
+		UIDValidity: st.validity,
+		UID:         imap.UID(st.keys[msg.Key()]),
 	}, nil
-}
-
-func findNewKey(sub string, before map[string]bool) string {
-	entries, _ := os.ReadDir(sub)
-	for _, e := range entries {
-		if !before[e.Name()] {
-			return e.Name()
-		}
-	}
-	return ""
 }
 
 func (s *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
@@ -230,8 +210,8 @@ func (s *session) Copy(numSet imap.NumSet, destName string) (*imap.CopyData, err
 	var destUIDs imap.UIDSet
 	var srcUIDs imap.UIDSet
 	forEach(numSet, s.userDir, func(m mboxMsg) {
-		srcUIDs.AddNum(imap.UID(m.uid))
-		if uid := copyMsg(m.path, destDir); uid > 0 {
+		if uid := copyMsg(m.path, destDir, m.flags); uid > 0 {
+			srcUIDs.AddNum(imap.UID(m.uid))
 			destUIDs.AddNum(imap.UID(uid))
 		}
 	})
@@ -244,25 +224,57 @@ func (s *session) Copy(numSet imap.NumSet, destName string) (*imap.CopyData, err
 
 func (s *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, destName string) error {
 	destDir := s.mboxPath(destName)
+	var srcUIDs, destUIDs imap.UIDSet
+	var toExpunge []uint32
+
 	forEach(numSet, s.userDir, func(m mboxMsg) {
-		if uid := copyMsg(m.path, destDir); uid > 0 {
-			os.Remove(m.path)
+		uid := copyMsg(m.path, destDir, m.flags)
+		if uid == 0 {
+			return
 		}
+		if err := os.Remove(m.path); err != nil {
+			return
+		}
+		srcUIDs.AddNum(imap.UID(m.uid))
+		destUIDs.AddNum(imap.UID(uid))
+		toExpunge = append(toExpunge, m.seq)
 	})
+
+	if w != nil {
+		w.WriteCopyData(&imap.CopyData{
+			SourceUIDs:  srcUIDs,
+			UIDValidity: uidVal(destDir),
+			DestUIDs:    destUIDs,
+		})
+		// Report expunges high-to-low so sequence numbers stay valid as the
+		// client removes them.
+		sort.Slice(toExpunge, func(i, j int) bool { return toExpunge[i] > toExpunge[j] })
+		for _, seq := range toExpunge {
+			w.WriteExpunge(seq)
+		}
+	}
 	return nil
 }
 
 func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
-	num := 1
-	forEach(nil, s.userDir, func(m mboxMsg) {
-		if hasFlag(m.flags, "T") {
-			if uids == nil || uids.Contains(imap.UID(m.uid)) {
-				os.Remove(m.path)
-				w.WriteExpunge(uint32(num))
-				num++
-			}
+	msgs := scanDir(s.userDir)
+	// Walk in descending sequence order so each reported expunge does not shift
+	// the sequence numbers of messages still to be reported.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if !hasFlag(m.flags, "T") {
+			continue
 		}
-	})
+		if uids != nil && !uids.Contains(imap.UID(m.uid)) {
+			continue
+		}
+		if err := os.Remove(m.path); err != nil {
+			continue
+		}
+		if w != nil {
+			w.WriteExpunge(m.seq)
+		}
+	}
 	return nil
 }
 
@@ -270,21 +282,132 @@ func (s *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria,
 	data := &imap.SearchData{}
 	var seqSet imap.SeqSet
 	var uidSet imap.UIDSet
+	var min, max uint32
+	count := uint32(0)
+
 	forEach(nil, s.userDir, func(m mboxMsg) {
+		if !matchCriteria(m, criteria) {
+			return
+		}
 		switch kind {
 		case imapserver.NumKindSeq:
 			seqSet.AddNum(m.seq)
 		case imapserver.NumKindUID:
 			uidSet.AddNum(imap.UID(m.uid))
 		}
+		n := m.seq
+		if kind == imapserver.NumKindUID {
+			n = m.uid
+		}
+		if min == 0 || n < min {
+			min = n
+		}
+		if n > max {
+			max = n
+		}
+		count++
 	})
+
 	switch kind {
 	case imapserver.NumKindSeq:
 		data.All = seqSet
 	case imapserver.NumKindUID:
 		data.All = uidSet
 	}
+	data.Min = min
+	data.Max = max
+	data.Count = count
 	return data, nil
+}
+
+// matchCriteria evaluates a (subset of) IMAP SEARCH criteria against a message.
+// Supported: ALL (nil), flag/not-flag, UID/seq sets, size (Larger/Smaller),
+// internal-date (Since/Before), header/body/text substring, and And/Or/Not
+// combinators. Unsupported criteria are treated as matching so SEARCH never
+// returns fewer results than it should.
+func matchCriteria(m mboxMsg, c *imap.SearchCriteria) bool {
+	if c == nil {
+		return true
+	}
+
+	for _, f := range c.Flag {
+		if !hasFlag(m.flags, maildirFlagFromIMAP(f)) {
+			return false
+		}
+	}
+	for _, f := range c.NotFlag {
+		if hasFlag(m.flags, maildirFlagFromIMAP(f)) {
+			return false
+		}
+	}
+
+	if c.Larger > 0 && m.size <= c.Larger {
+		return false
+	}
+	if c.Smaller > 0 && m.size >= c.Smaller {
+		return false
+	}
+
+	if !c.Since.IsZero() && m.date.Before(c.Since) {
+		return false
+	}
+	if !c.Before.IsZero() && !m.date.Before(c.Before) {
+		return false
+	}
+
+	for _, set := range c.SeqNum {
+		if !set.Contains(m.seq) {
+			return false
+		}
+	}
+	for _, set := range c.UID {
+		if !set.Contains(imap.UID(m.uid)) {
+			return false
+		}
+	}
+
+	// Substring matches require reading the message; only do so when asked.
+	if len(c.Header) > 0 || len(c.Body) > 0 || len(c.Text) > 0 {
+		raw, err := os.ReadFile(m.path)
+		if err != nil {
+			return false
+		}
+		lowerAll := strings.ToLower(string(raw))
+		header := strings.ToLower(string(extractHeader(raw)))
+		for _, h := range c.Header {
+			needle := strings.ToLower(h.Key)
+			if h.Value != "" {
+				needle += ":"
+			}
+			if !strings.Contains(header, needle) ||
+				(h.Value != "" && !strings.Contains(header, strings.ToLower(h.Value))) {
+				return false
+			}
+		}
+		for _, b := range c.Body {
+			if !strings.Contains(lowerAll, strings.ToLower(b)) {
+				return false
+			}
+		}
+		for _, txt := range c.Text {
+			if !strings.Contains(lowerAll, strings.ToLower(txt)) {
+				return false
+			}
+		}
+	}
+
+	for i := range c.Not {
+		if matchCriteria(m, &c.Not[i]) {
+			return false
+		}
+	}
+	for _, pair := range c.Or {
+		if !matchCriteria(m, &pair[0]) && !matchCriteria(m, &pair[1]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (s *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
@@ -311,13 +434,7 @@ func (s *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *
 			fw.WriteBodyStructure(bodyStructure(raw))
 		}
 		for _, bs := range options.BodySection {
-			var sectionData []byte
-			switch bs.Specifier {
-			case imap.PartSpecifierHeader:
-				sectionData = extractHeader(raw)
-			default:
-				sectionData = raw
-			}
+			sectionData := bodySectionData(raw, bs)
 			wc := fw.WriteBodySection(bs, int64(len(sectionData)))
 			wc.Write(sectionData)
 			wc.Close()
@@ -388,9 +505,10 @@ type mboxMsg struct {
 }
 
 func scanDir(dir string) []mboxMsg {
+	st := syncUIDs(dir)
+
 	seen := make(map[string]bool)
 	var msgs []mboxMsg
-	seq := uint32(0)
 	for _, sub := range []string{"new", "cur"} {
 		entries, err := os.ReadDir(filepath.Join(dir, sub))
 		if err != nil {
@@ -401,18 +519,21 @@ func scanDir(dir string) []mboxMsg {
 				continue
 			}
 			key := e.Name()
-			if seen[key] {
+			bk := baseKey(key)
+			if seen[bk] {
 				continue
 			}
-			seen[key] = true
+			uid, ok := st.keys[bk]
+			if !ok {
+				continue
+			}
 			info, err := e.Info()
 			if err != nil {
 				continue
 			}
-			seq++
+			seen[bk] = true
 			msgs = append(msgs, mboxMsg{
-				uid:   uidFromKey(key),
-				seq:   seq,
+				uid:   uid,
 				path:  filepath.Join(dir, sub, key),
 				flags: parseMaildirFlags(key),
 				date:  info.ModTime(),
@@ -420,7 +541,18 @@ func scanDir(dir string) []mboxMsg {
 			})
 		}
 	}
+
+	// IMAP requires sequence numbers to follow ascending UID order.
+	sort.Slice(msgs, func(i, j int) bool { return msgs[i].uid < msgs[j].uid })
+	for i := range msgs {
+		msgs[i].seq = uint32(i + 1)
+	}
 	return msgs
+}
+
+// mailboxUIDNext returns the next UID a new message in this mailbox would get.
+func mailboxUIDNext(dir string) imap.UID {
+	return imap.UID(syncUIDs(dir).next)
 }
 
 func forEach(numSet imap.NumSet, userDir string, fn func(m mboxMsg)) {
@@ -449,18 +581,9 @@ func forEach(numSet imap.NumSet, userDir string, fn func(m mboxMsg)) {
 	}
 }
 
-func uidFromKey(key string) uint32 {
-	idx := strings.LastIndex(key, ":2,")
-	if idx >= 0 {
-		key = key[:idx]
-	}
-	h := uint32(0)
-	for _, c := range key {
-		h = h*31 + uint32(c)
-	}
-	return h
-}
-
+// uidVal derives a stable UIDVALIDITY seed from the mailbox path. It is used
+// only as the initial value stored in the UID list; thereafter the persisted
+// value is authoritative.
 func uidVal(dir string) uint32 {
 	h := uint32(0xdeadbeef)
 	for _, c := range dir {
@@ -512,20 +635,122 @@ func imapFlagsFromMaildir(mf []string) []imap.Flag {
 func maildirFlagsFromIMAP(imapFlags []imap.Flag) []string {
 	var f []string
 	for _, fl := range imapFlags {
-		switch fl {
-		case imap.FlagSeen:
-			f = append(f, "S")
-		case imap.FlagAnswered:
-			f = append(f, "R")
-		case imap.FlagFlagged:
-			f = append(f, "F")
-		case imap.FlagDeleted:
-			f = append(f, "T")
-		case imap.FlagDraft:
-			f = append(f, "D")
+		if s := maildirFlagFromIMAP(fl); s != "" {
+			f = append(f, s)
 		}
 	}
 	return f
+}
+
+// maildirFlagFromIMAP maps a single IMAP flag to its maildir letter ("" if the
+// flag has no maildir equivalent, e.g. \Recent or custom keywords).
+func maildirFlagFromIMAP(fl imap.Flag) string {
+	switch fl {
+	case imap.FlagSeen:
+		return "S"
+	case imap.FlagAnswered:
+		return "R"
+	case imap.FlagFlagged:
+		return "F"
+	case imap.FlagDeleted:
+		return "T"
+	case imap.FlagDraft:
+		return "D"
+	}
+	return ""
+}
+
+// maildirFlagsFromStrings converts internal maildir flag letters to
+// go-maildir's Flag type.
+func maildirFlagsFromStrings(flags []string) []maildir.Flag {
+	var out []maildir.Flag
+	for _, f := range flags {
+		if f != "" {
+			out = append(out, maildir.Flag(f[0]))
+		}
+	}
+	return out
+}
+
+// maildirFlagsFromIMAPFlags converts IMAP flags to go-maildir's Flag type.
+func maildirFlagsFromIMAPFlags(imapFlags []imap.Flag) []maildir.Flag {
+	return maildirFlagsFromStrings(maildirFlagsFromIMAP(imapFlags))
+}
+
+// bodySectionData extracts the requested BODY[...] section from a raw message,
+// honouring the HEADER / TEXT specifiers, HeaderFields filters and partial byte
+// ranges.
+func bodySectionData(raw []byte, bs *imap.FetchItemBodySection) []byte {
+	var data []byte
+	switch bs.Specifier {
+	case imap.PartSpecifierHeader:
+		data = extractHeader(raw)
+		if len(bs.HeaderFields) > 0 {
+			data = filterHeaderFields(data, bs.HeaderFields, false)
+		} else if len(bs.HeaderFieldsNot) > 0 {
+			data = filterHeaderFields(data, bs.HeaderFieldsNot, true)
+		}
+	case imap.PartSpecifierText:
+		data = extractText(raw)
+	default:
+		data = raw
+	}
+
+	if bs.Partial != nil {
+		data = applyPartial(data, bs.Partial.Offset, bs.Partial.Size)
+	}
+	return data
+}
+
+func applyPartial(data []byte, offset, size int64) []byte {
+	if offset >= int64(len(data)) {
+		return nil
+	}
+	data = data[offset:]
+	if size < int64(len(data)) {
+		data = data[:size]
+	}
+	return data
+}
+
+// extractText returns the body of the message (everything after the header/body
+// separator).
+func extractText(data []byte) []byte {
+	idx := bytes.Index(data, []byte("\r\n\r\n"))
+	if idx < 0 {
+		return nil
+	}
+	return data[idx+4:]
+}
+
+// filterHeaderFields keeps (exclude=false) or drops (exclude=true) the named
+// header fields from a header block.
+func filterHeaderFields(header []byte, fields []string, exclude bool) []byte {
+	want := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		want[strings.ToLower(f)] = true
+	}
+	var out bytes.Buffer
+	for _, line := range bytes.Split(header, []byte("\r\n")) {
+		ls := string(line)
+		if ls == "" {
+			continue
+		}
+		// Continuation lines start with whitespace; this simple filter keeps a
+		// field only by its first line, which is sufficient for the common
+		// single-line headers clients request (Subject, From, Date, ...).
+		name := ls
+		if idx := strings.IndexByte(ls, ':'); idx >= 0 {
+			name = ls[:idx]
+		}
+		_, named := want[strings.ToLower(strings.TrimSpace(name))]
+		if named != exclude {
+			out.WriteString(ls)
+			out.WriteString("\r\n")
+		}
+	}
+	out.WriteString("\r\n")
+	return out.Bytes()
 }
 
 func applyFlags(current []string, store *imap.StoreFlags) []string {
@@ -581,21 +806,26 @@ func updateFlags(path string, flags []string) error {
 	return os.Rename(path, filepath.Join(dir, newBase))
 }
 
-func copyMsg(srcPath, destDir string) uint32 {
+// copyMsg copies a message file into destDir, preserving its maildir flags, and
+// returns the UID assigned to the copy in the destination mailbox (0 on error).
+func copyMsg(srcPath, destDir string, flags []string) uint32 {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return 0
 	}
-	del, err := maildir.NewDelivery(destDir)
+	md := maildir.Dir(destDir)
+	msg, wc, err := md.Create(maildirFlagsFromStrings(flags))
 	if err != nil {
 		return 0
 	}
-	if _, err := io.Copy(del, bytes.NewReader(data)); err != nil {
-		del.Abort()
+	if _, err := io.Copy(wc, bytes.NewReader(data)); err != nil {
+		wc.Close()
 		return 0
 	}
-	del.Close()
-	return uint32(time.Now().UnixNano() % 100000)
+	if err := wc.Close(); err != nil {
+		return 0
+	}
+	return syncUIDs(destDir).keys[msg.Key()]
 }
 
 func extractHeader(data []byte) []byte {

@@ -244,6 +244,95 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+// TestSearchCriteria verifies SEARCH honours the criteria instead of always
+// returning every message.
+func TestSearchCriteria(t *testing.T) {
+	sess, cleanup := newTestSession(t)
+	defer os.RemoveAll(cleanup)
+
+	sess.Login("testuser", "testpass")
+
+	// One seen, one unseen.
+	seenUID := mustAppendUID(t, sess, "INBOX", "Subject: Seen\r\n\r\nhello world", []imap.Flag{imap.FlagSeen})
+	unseenUID := mustAppendUID(t, sess, "INBOX", "Subject: Unseen\r\n\r\ngoodbye", nil)
+	sess.Select("INBOX", nil)
+
+	// UNSEEN -> only the unseen message.
+	res, err := sess.Search(imapserver.NumKindUID, &imap.SearchCriteria{
+		NotFlag: []imap.Flag{imap.FlagSeen},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Search(UNSEEN) = %v", err)
+	}
+	uids, _ := res.All.(imap.UIDSet)
+	if !uids.Contains(unseenUID) || uids.Contains(seenUID) {
+		t.Errorf("UNSEEN search = %v, want only uid %d", uids, unseenUID)
+	}
+
+	// BODY "world" -> only the first message.
+	res, err = sess.Search(imapserver.NumKindUID, &imap.SearchCriteria{
+		Body: []string{"world"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Search(BODY) = %v", err)
+	}
+	uids, _ = res.All.(imap.UIDSet)
+	if !uids.Contains(seenUID) || uids.Contains(unseenUID) {
+		t.Errorf("BODY search = %v, want only uid %d", uids, seenUID)
+	}
+}
+
+// TestUIDsMonotonic verifies UIDs are assigned in ascending order and stay
+// stable after a flag change (which renames the maildir file).
+func TestUIDsMonotonic(t *testing.T) {
+	sess, cleanup := newTestSession(t)
+	defer os.RemoveAll(cleanup)
+
+	sess.Login("testuser", "testpass")
+
+	uid1 := mustAppendUID(t, sess, "INBOX", "Subject: One\r\n\r\nA", nil)
+	uid2 := mustAppendUID(t, sess, "INBOX", "Subject: Two\r\n\r\nB", nil)
+	uid3 := mustAppendUID(t, sess, "INBOX", "Subject: Three\r\n\r\nC", nil)
+
+	if !(uid1 < uid2 && uid2 < uid3) {
+		t.Fatalf("UIDs not ascending: %d, %d, %d", uid1, uid2, uid3)
+	}
+
+	sess.Select("INBOX", nil)
+
+	// Flag the second message \Seen (renames its file); its UID must not change.
+	if err := sess.Store(nil, imap.UIDSet{{Start: uid2, Stop: uid2}}, &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imap.FlagSeen},
+	}, nil); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	data, err := sess.Search(imapserver.NumKindUID, &imap.SearchCriteria{
+		Flag: []imap.Flag{imap.FlagSeen},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	uids, _ := data.All.(imap.UIDSet)
+	if !uids.Contains(uid2) {
+		t.Errorf("after flag change, seen search = %v, want to contain stable uid %d", uids, uid2)
+	}
+}
+
+func mustAppendUID(t *testing.T, sess imapserver.Session, mbox, msg string, flags []imap.Flag) imap.UID {
+	t.Helper()
+	var opts *imap.AppendOptions
+	if len(flags) > 0 {
+		opts = &imap.AppendOptions{Flags: flags}
+	}
+	ad, err := sess.Append(mbox, strings.NewReader(msg), opts)
+	if err != nil {
+		t.Fatalf("Append(%q): %v", msg, err)
+	}
+	return ad.UID
+}
+
 func TestPoll(t *testing.T) {
 	sess, cleanup := newTestSession(t)
 	defer os.RemoveAll(cleanup)

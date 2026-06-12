@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/smtp"
@@ -72,6 +73,21 @@ func deliverToMX(mxAddr, heloName, from string, to []string, data []byte) error 
 
 	if err := client.Hello(heloName); err != nil {
 		return fmt.Errorf("HELO %s: %w", heloName, err)
+	}
+
+	// Opportunistic STARTTLS: upgrade to TLS when the remote MX advertises it.
+	// The MX hostname rarely matches its certificate, so verification is left
+	// disabled (standard practice for opportunistic MTA-to-MTA TLS); it still
+	// protects the message from passive eavesdropping in transit.
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		host := mxAddr
+		if h, _, err := net.SplitHostPort(mxAddr); err == nil {
+			host = h
+		}
+		tlsConfig := &tls.Config{ServerName: host, InsecureSkipVerify: true}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("STARTTLS to %s: %w", mxAddr, err)
+		}
 	}
 
 	if err := client.Mail(from); err != nil {
