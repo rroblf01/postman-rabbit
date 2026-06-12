@@ -59,6 +59,40 @@ func TestNewSignerWithKey(t *testing.T) {
 	}
 }
 
+func TestNewSignerWithPKCS1Key(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der := x509.MarshalPKCS1PrivateKey(key)
+	f, err := os.CreateTemp("", "dkim-pkcs1-*.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := pem.Encode(f, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := f.Name()
+	defer os.Remove(keyPath)
+
+	s, err := NewSigner("pkcs1", "example.com", keyPath)
+	if err != nil {
+		t.Fatalf("NewSigner with PKCS1 key = %v", err)
+	}
+	if s == nil {
+		t.Fatal("NewSigner returned nil with PKCS1 key")
+	}
+
+	signed, err := s.Sign([]byte("Subject: PKCS1 Test\r\n\r\nBody"), "from@example.com", "<id@example.com>")
+	if err != nil {
+		t.Fatalf("Sign with PKCS1 key = %v", err)
+	}
+	if !containsBytes(signed, []byte("DKIM-Signature:")) {
+		t.Error("signed message missing DKIM-Signature header")
+	}
+}
+
 func TestSignerSign(t *testing.T) {
 	keyPath := generateTestKey(t)
 	defer os.Remove(keyPath)
