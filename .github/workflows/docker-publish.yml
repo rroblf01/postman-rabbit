@@ -1,10 +1,9 @@
 name: Publish Docker image
 
 # Builds the scratch-based image and pushes it to the GitHub Container Registry
-# (ghcr.io). Runs on pushes to the default branch and on version tags (v1.2.3).
+# (ghcr.io). Publishes only when a version tag (v1.2.3) is pushed.
 on:
   push:
-    branches: [master, main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -40,14 +39,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # latest -> default branch, semver tags -> version tags, plus the
-          # short commit SHA for every build.
+          # vX.Y.Z tag -> :X.Y.Z, :X.Y, :latest, plus the commit SHA.
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build and push
         uses: docker/build-push-action@v6
