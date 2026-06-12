@@ -2,6 +2,7 @@ package imap
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -269,5 +270,38 @@ func TestNamespace(t *testing.T) {
 	}
 	if ns.Personal[0].Delim != delim {
 		t.Errorf("Delim = %q, want %q", ns.Personal[0].Delim, delim)
+	}
+}
+
+func TestMboxPath(t *testing.T) {
+	dir, err := os.MkdirTemp("", "imap-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store := storage.New(dir)
+	authMgr := auth.New(map[string]string{"user": "pass"})
+	sess := NewSession(authMgr, store).(*session)
+	sess.Login("user", "pass")
+
+	tests := []struct {
+		name     string
+		expected string
+	}{
+		{"INBOX", sess.userDir},
+		{"INBOX/", sess.userDir},
+		{"", sess.userDir},
+		{"INBOX/Work", filepath.Join(sess.userDir, "Work")},
+		{"INBOX/../etc", sess.userDir},
+		{"INBOX/../../../tmp", sess.userDir},
+		{"/etc/passwd", sess.userDir},
+	}
+
+	for _, tc := range tests {
+		got := sess.mboxPath(tc.name)
+		if got != tc.expected {
+			t.Errorf("mboxPath(%q) = %q, want %q", tc.name, got, tc.expected)
+		}
 	}
 }

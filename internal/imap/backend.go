@@ -347,7 +347,11 @@ func (s *session) mboxPath(name string) string {
 	if name == "" || name == "INBOX" || name == "INBOX/" {
 		return s.userDir
 	}
-	return filepath.Join(s.userDir, strings.TrimPrefix(name, "INBOX/"))
+	clean := filepath.Clean(strings.TrimPrefix(name, "INBOX/"))
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return s.userDir
+	}
+	return filepath.Join(s.userDir, clean)
 }
 
 func (s *session) listMboxes() []string {

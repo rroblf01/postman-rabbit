@@ -68,3 +68,75 @@ func TestUsers(t *testing.T) {
 		t.Errorf("Users() = %v, missing expected users", users)
 	}
 }
+
+func TestAuthenticateLongCredentials(t *testing.T) {
+	longPass := string(make([]byte, 10000))
+	m := New(map[string]string{
+		"normal": "pass",
+		"user":   longPass,
+	})
+
+	if m.Authenticate("normal", longPass) {
+		t.Error("long password for normal user should fail")
+	}
+	if !m.Authenticate("user", longPass) {
+		t.Error("user with long password should authenticate")
+	}
+	if m.Authenticate("unknown", longPass) {
+		t.Error("unknown user should not authenticate")
+	}
+}
+
+func TestAuthenticateSpecialChars(t *testing.T) {
+	m := New(map[string]string{
+		"user@domain":   "p@ss!",
+		"user name":     "pass word",
+		"user\n":        "pass",
+	})
+
+	if !m.Authenticate("user@domain", "p@ss!") {
+		t.Error("special chars in username/password should work")
+	}
+	if !m.Authenticate("user name", "pass word") {
+		t.Error("spaces in credentials should work")
+	}
+	if !m.Authenticate("user\n", "pass") {
+		t.Error("newline in username should work")
+	}
+}
+
+func TestAuthenticateConcurrent(t *testing.T) {
+	m := New(map[string]string{
+		"alice": "secret",
+	})
+
+	n := 20
+	errc := make(chan bool, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			errc <- m.Authenticate("alice", "secret")
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if !<-errc {
+			t.Error("concurrent auth failed")
+		}
+	}
+}
+
+func TestAuthenticateEmptyMap(t *testing.T) {
+	m := New(nil)
+	if m.Authenticate("anyone", "anything") {
+		t.Error("empty user map should not authenticate anyone")
+	}
+	if m.Exists("anyone") {
+		t.Error("empty user map should not find anyone")
+	}
+}
+
+func TestExistsEmptyUsername(t *testing.T) {
+	m := New(map[string]string{"": "pass"})
+	if !m.Exists("") {
+		t.Error("empty username user should exist")
+	}
+}
