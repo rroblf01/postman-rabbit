@@ -164,6 +164,14 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 
 func (s *session) Append(mailbox string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
 	mboxDir := s.mboxPath(mailbox)
+
+	sub := filepath.Join(mboxDir, "new")
+	before := make(map[string]bool)
+	entries, _ := os.ReadDir(sub)
+	for _, e := range entries {
+		before[e.Name()] = true
+	}
+
 	del, err := maildir.NewDelivery(mboxDir)
 	if err != nil {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Cannot append"}
@@ -175,10 +183,31 @@ func (s *session) Append(mailbox string, r imap.LiteralReader, options *imap.App
 	if err := del.Close(); err != nil {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Cannot save message"}
 	}
+
+	key := findNewKey(sub, before)
+	uid := uidFromKey(key)
+
+	if options != nil && len(options.Flags) > 0 {
+		suffix := ":2," + strings.Join(maildirFlagsFromIMAP(options.Flags), "")
+		oldPath := filepath.Join(sub, key)
+		newPath := filepath.Join(mboxDir, "cur", key+suffix)
+		os.Rename(oldPath, newPath)
+	}
+
 	return &imap.AppendData{
 		UIDValidity: uidVal(mboxDir),
-		UID:         imap.UID(time.Now().UnixNano() % 100000),
+		UID:         imap.UID(uid),
 	}, nil
+}
+
+func findNewKey(sub string, before map[string]bool) string {
+	entries, _ := os.ReadDir(sub)
+	for _, e := range entries {
+		if !before[e.Name()] {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 func (s *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
@@ -199,12 +228,15 @@ func (s *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
 func (s *session) Copy(numSet imap.NumSet, destName string) (*imap.CopyData, error) {
 	destDir := s.mboxPath(destName)
 	var destUIDs imap.UIDSet
+	var srcUIDs imap.UIDSet
 	forEach(numSet, s.userDir, func(m mboxMsg) {
+		srcUIDs.AddNum(imap.UID(m.uid))
 		if uid := copyMsg(m.path, destDir); uid > 0 {
 			destUIDs.AddNum(imap.UID(uid))
 		}
 	})
 	return &imap.CopyData{
+		SourceUIDs:  srcUIDs,
 		UIDValidity: uidVal(destDir),
 		DestUIDs:    destUIDs,
 	}, nil
@@ -414,6 +446,10 @@ func forEach(numSet imap.NumSet, userDir string, fn func(m mboxMsg)) {
 }
 
 func uidFromKey(key string) uint32 {
+	idx := strings.LastIndex(key, ":2,")
+	if idx >= 0 {
+		key = key[:idx]
+	}
 	h := uint32(0)
 	for _, c := range key {
 		h = h*31 + uint32(c)
