@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Action versions pinned in the workflow YAMLs (.github/workflows/*.yml).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Go module dependencies (go.mod / go.sum).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # Base images in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: docker
