@@ -1,5 +1,5 @@
 # ---- build stage ----
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # ca-certificates so we can copy the CA bundle into the scratch image (needed
 # for outbound STARTTLS certificate verification).
